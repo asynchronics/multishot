@@ -1,0 +1,91 @@
+# multishot
+
+An async, lock-free, reusable channel for sending single values to asynchronous
+tasks.
+
+[![Cargo](https://img.shields.io/crates/v/multishot.svg)](https://crates.io/crates/multishot)
+[![Documentation](https://docs.rs/multishot/badge.svg)](https://docs.rs/multishot)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](https://github.com/asynchronics/multishot#license)
+
+## Overview
+
+In a multi-shot channel, the receiver half is reusable and able to recycle the
+sender half without ever re-allocating. Sending or awaiting a value and
+recycling the sender are all lock-free operations, the last two being
+additionally wait-free. Producing a new sender does not require additional
+synchronization or spinning: it is guaranteed to succeed immediately if the
+value sent by a previous sender was received.
+
+## Usage
+
+Add this to your `Cargo.toml`:
+
+```toml
+[dependencies]
+multishot = "0.1.0"
+```
+
+## Example
+
+```rust
+use std::thread;
+
+async {
+    let (s, mut r) = multishot::channel();
+
+    // Send a value to the channel from another thread.
+    thread::spawn(move || {
+        s.send("42");
+    });
+
+    // Receive the value.
+    let res = r.recv().await;
+    assert_eq!(res, Ok("42"));
+
+    // Recycle the sender. This is guaranteed to succeed if the previous
+    // message has been read.
+    let s = r.sender().unwrap();
+
+    // Drop the sender on another thread without sending a message.
+    thread::spawn(move || {
+        drop(s);
+    });
+
+    // Receive an error.
+    let res = r.recv().await;
+    assert_eq!(res, Err(multishot::RecvError {}));
+};
+```
+
+## Safety
+
+This is a low-level primitive and as such its implementation relies on `unsafe`.
+The test suite makes extensive use of [Loom] to assess its correctness. As
+amazing as it is, however, Loom is only a tool: it cannot formally prove the
+absence of data races.
+
+[Loom]: https://github.com/tokio-rs/loom
+
+
+## Implementation
+
+The implementation uses only 2 read-modify-write operations to poll the
+receiver's future (or none if the value is already present) and typically 1 or 2
+read-modify-write for sending, depending whether a waker was registered or not.
+Overall, compared to a non-reusable one-shot channel such as Tokio's, the only
+extra cost is 1 read-modify-write operation if and only if a waker was already
+registered when the value is sent. The implementation of Multishot partially
+offsets this small extra cost, however, by using arithmetic atomic operations
+when sending a value rather than typically more expensive compare-and-swap
+operations.
+
+## License
+
+This software is licensed under the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

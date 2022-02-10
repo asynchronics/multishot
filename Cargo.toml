@@ -1,0 +1,20 @@
+[package]
+name = "multishot"
+version = "0.1.0"
+authors = ["Serge Barral <serge.barral@asynchronics.com>"]
+edition = "2021"
+rust-version = "1.56"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/asynchronics/multishot"
+readme = "README.md"
+description = """
+An async, lock-free, reusable channel for sending single values to asynchronous tasks.
+"""
+categories = ["asynchronous", "concurrency"]
+keywords = ["async", "channel", "oneshot", "reusable", "futures"]
+
+[dev-dependencies]
+executor = "0.8"
+
+[target.'cfg(multishot_loom)'.dependencies]
+loom = "0.5"
