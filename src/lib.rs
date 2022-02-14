@@ -257,6 +257,113 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Returns a new sender if there is currently no live sender and poll the
+    /// receiver immediately.
+    ///
+    /// When building futures manually, this method provides a better
+    /// alternative to sequentially calling [`sender`](Receiver::sender) and
+    /// then polling the [`recv`](Receiver::recv) future:
+    /// 1) it is much faster if there is no live sender (no Read-Modify-Write
+    ///   atomic operations whereas polling would normally use 2),
+    /// 2) it is atomic: obtaining `None` implies that a sender was alive when
+    ///   the receiver was polled so it is guaranteed that the task will be
+    ///   notified in the future. Another consequence of atomicity is that
+    ///   whether a sender is returned or not, it can be implicitly considered
+    ///   that poll returns [`Pending`](Poll::Pending).
+    ///
+    ///  
+    pub fn sender_and_poll(&mut self, cx: &mut Context<'_>) -> Option<Sender<T>> {
+        // A sender is created only if no sender is alive. The method proceeds
+        // in two steps. In the first step, if the channel has been closed (no
+        // live sender) then the new waker is registered and a new sender is
+        // created. Otherwise, the `UPDATE` flag is cleared to make sure that a
+        // concurrent sender operation does not try to access the waker update
+        // slot while a new waker is being registered. The `UPDATE` flag is then
+        // set in Step 2 once the new waker is registered, checking at the same
+        // time whether the sender has not been consumed while the new waker was
+        // being registered. This check is necessary to uphold the guarantee
+        // that if the method fails to create a sender, there is still a live
+        // sender and a notification will be sent (no-notification-loss
+        // guarantee).
+        //
+        // Transitions:
+        //
+        // Step 1
+        //
+        // |  O  U  I  |  O  U  I  |
+        // |-----------|-----------|
+        // |  0  0  0  |  1  0  0  | -> Return Some(Sender)
+        // |  0  1  x  |  1  0  0  | -> Return Some(Sender)
+        // |  1  0  x  |  1  0  x  | -> Step 2
+        // |  1  1  x  |  1  0  x  | -> Step 2
+        //
+        // Step 2
+        //
+        // |  O  U  I  |  O  U  I  |
+        // |-----------|-----------|
+        // |  0  0  x  |  1  0  0  | -> Return Some(Sender)
+        // |  0  1  x  |  1  0  0  | -> Return Some(Sender)
+        // |  1  0  x  |  1  1  x  | -> Return None
+
+        // Fast path: check whether the sender has been consumed, without
+        // Read-Write-Modify operation.
+        //
+        // Ordering: This load synchronizes with the Release store in the
+        // `Sender::send` or `Sender::drop` methods  to ensure that the value
+        // (if any) is visible and can be safely dropped, or that the drop of a
+        // previous waker (if any) is fully committed.
+        let state = self.inner().state.load(Ordering::Acquire);
+
+        if state & OPEN == 0 {
+            // Safety: the sender is consumed and the Acquire ordering on the
+            // state ensures that all previous memory operations by the sender are
+            // visible.
+            return Some(unsafe { self.sender_with_waker(state, Some(cx.waker().clone())) });
+        }
+
+        // Prevent the sender from updating the current waker slot.
+        //
+        // Ordering: Acquire ordering is necessary since a previous waker may be
+        // dropped.
+        let state = self.inner().state.fetch_and(!UPDATE, Ordering::Acquire);
+
+        // Check again whether the sender has closed the channel.
+        if state & OPEN == 0 {
+            // Safety: the sender is consumed and the Acquire ordering on the
+            // state ensures that all previous memory operations by the sender are
+            // visible.
+            return Some(unsafe { self.sender_with_waker(state, Some(cx.waker().clone())) });
+        }
+
+        // Register the new waker in the unused waker slot.
+        let idx = !state & INDEX;
+        unsafe {
+            // Safety: the sender thread never accesses the waker stored in the
+            // slot not pointed to by `INDEX` and it does not modify `INDEX` as
+            // long as the `UPDATE` flag is cleared.
+            if !self.inner().sender_will_wake(idx, cx.waker()) {
+                self.inner().set_waker(idx, Some(cx.waker().clone()));
+            }
+        }
+
+        // Make the new waker visible to the sender.
+        //
+        // Ordering: the waker may have been modified above so Release ordering
+        // is necessary to synchronize with the Acquire load in `Sender::send`
+        // or `Sender::drop`. Acquire ordering is also necessary since the
+        // message may be loaded.
+        let state = self.inner().state.fetch_or(UPDATE, Ordering::AcqRel);
+
+        // Check again whether the sender has closed the channel.
+        if state & OPEN == 0 {
+            // Safety: there is no live sender so no other thread can access the
+            // waker.
+            Some(unsafe { self.sender_with_waker(state, self.inner().take_waker(idx)) })
+        } else {
+            None
+        }
+    }
+
     /// Receives a message asynchronously.
     ///
     /// If the channel is empty, the future returned by this method waits until
