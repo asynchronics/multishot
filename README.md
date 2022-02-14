@@ -22,7 +22,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-multishot = "0.1.0"
+multishot = "0.2.0"
 ```
 
 ## Example
