@@ -170,7 +170,7 @@ impl<T> Inner<T> {
     //
     // Safety: the caller must have exclusive access to the waker at index
     // `idx`.
-    unsafe fn waker_will_wake(&self, idx: usize, other: &Waker) -> bool {
+    unsafe fn sender_will_wake(&self, idx: usize, other: &Waker) -> bool {
         match self.waker[idx].with(|waker| &(*waker)) {
             Some(waker) => waker.will_wake(other),
             None => false,
@@ -181,8 +181,8 @@ impl<T> Inner<T> {
     //
     // Safety: the caller must have exclusive access to the waker at index
     // `idx`.
-    unsafe fn set_waker(&self, idx: usize, new: Waker) {
-        self.waker[idx].with_mut(|waker| (*waker) = Some(new));
+    unsafe fn set_waker(&self, idx: usize, new: Option<Waker>) {
+        self.waker[idx].with_mut(|waker| (*waker) = new);
     }
 
     // Takes the waker out of the waker slot at index `idx`.
@@ -225,13 +225,13 @@ impl<T> Receiver<T> {
         }
     }
 
-    /// Returns a new sender, provided that there is currently no live sender.
+    /// Returns a new sender if there is currently no live sender.
     ///
     /// This operation is wait-free. It is guaranteed to succeed (i) on its
     /// first invocation and (ii) on further invocations if the future returned
     /// by [`recv`](Receiver::recv) has been `await`ed (i.e. polled to
     /// completion) after the previous sender was created.
-    pub fn sender(&self) -> Option<Sender<T>> {
+    pub fn sender(&mut self) -> Option<Sender<T>> {
         // A sender is created only if no sender is alive.
         //
         // Transitions:
@@ -247,34 +247,11 @@ impl<T> Receiver<T> {
         // `Sender::send` method to ensure that the value (if any) is visible
         // and can be safely dropped.
         let state = self.inner().state.load(Ordering::Acquire);
-
-        // Only create a sender if there is no live sender.
         if state & OPEN == 0 {
-            // If there is an unread value, drop it.
-            if state & UPDATE == UPDATE {
-                // Safety: the presence of an initialized value was just
-                // checked and there is no risk of race since there is no live
-                // sender.
-                unsafe {
-                    self.inner().drop_value_in_place();
-                }
-            }
-
-            // Note: one could set the current waker to `None` to prevent the
-            // new Sender from sending a spurious notification, but this is not
-            // necessary: `Sender::send` and the sender drop handler anyway
-            // ignore the initial value in the current waker slot.
-
-            // Ordering: since the sender is created right now on this thread,
-            // there is no risk that the sender will later write into the value
-            // slot before the above drop operation is visible, therefore
-            // Relaxed ordering is sufficient.
-            self.inner().state.store(OPEN, Ordering::Relaxed);
-
-            Some(Sender {
-                inner: self.inner,
-                _phantom: PhantomData,
-            })
+            // Safety: the sender is consumed and the Acquire ordering on the
+            // state ensures that all previous memory operations by the sender are
+            // visible.
+            Some(unsafe { self.sender_with_waker(state, None) })
         } else {
             None
         }
@@ -294,6 +271,37 @@ impl<T> Receiver<T> {
         // Safety: this is safe since `inner` is allocated for at least as long
         // as the receiver is alive.
         unsafe { self.inner.as_ref() }
+    }
+
+    /// Initialize the waker in slot 0, set the state to `OPEN` and return a sender.
+    ///
+    /// Safety: The sender must have been consumed and all memory operations by
+    /// the sender on the value and on the waker must be visible in this thread.
+    unsafe fn sender_with_waker(&mut self, state: usize, waker: Option<Waker>) -> Sender<T> {
+        // Only create a sender if there is no live sender.
+        debug_assert!(state & OPEN == 0);
+
+        // If there is an unread value, drop it.
+        if state & UPDATE == UPDATE {
+            // Safety: the presence of an initialized value was just
+            // checked and there is no risk of race since there is no live
+            // sender.
+            self.inner().drop_value_in_place();
+        }
+
+        // Set the waker in slot 0.
+        self.inner().set_waker(0, waker);
+
+        // Open the channel and set the current waker slot index to 0.
+        //
+        // Ordering: since the sender is created right now on this thread,
+        // Relaxed ordering is sufficient.
+        self.inner().state.store(OPEN, Ordering::Relaxed);
+
+        Sender {
+            inner: self.inner,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -409,13 +417,15 @@ impl<'a, T> Future for Recv<'a, T> {
         // |  0  1  x  |  0  0  0  | -> Return Ready(Message)
         // |  1  0  x  |  1  1  x  | -> Return Pending
 
-        // Check for the fast path: this is an optimization in case the sender
-        // has already been consumed and has closed the channel.
+        // Fast path: this is an optimization in case the sender has already
+        // been consumed and has closed the channel.
         let state = self.receiver.inner().state.load(Ordering::Acquire);
         if state & OPEN == 0 {
             return self.poll_complete(state);
         }
 
+        // Prevent the sender from updating the current waker slot.
+        //
         // Ordering: Acquire ordering is necessary since some member data may be
         // read and/or modified after reading the state.
         let state = self
@@ -435,8 +445,10 @@ impl<'a, T> Future for Recv<'a, T> {
             // Safety: the sender thread never accesses the waker stored in the
             // slot not pointed to by `INDEX` and it does not modify `INDEX` as
             // long as the `UPDATE` flag is cleared.
-            if !self.receiver.inner().waker_will_wake(idx, cx.waker()) {
-                self.receiver.inner().set_waker(idx, cx.waker().clone());
+            if !self.receiver.inner().sender_will_wake(idx, cx.waker()) {
+                self.receiver
+                    .inner()
+                    .set_waker(idx, Some(cx.waker().clone()));
             }
         }
 
@@ -519,11 +531,14 @@ impl<T> Sender<T> {
 
         // The current waker is always initially at index 0.
         let mut idx = 0;
-        // There cannot be a registered waker at index 0 at this point so it is
-        // set to `None`.
-        let mut waker: Option<Waker> = None;
 
         loop {
+            // Take the current waker.
+            //
+            // Safety: the receiver thread never accesses the waker stored at
+            // `INDEX`.
+            let waker = unsafe { this.inner().take_waker(idx) };
+
             // There is some small trickery here: the `state` is decremented by
             // the numeric value of `UPDATE` (0b010) in order to either clear
             // `UPDATE` if it was set, or to set `UPDATE` and clear `OPEN` (i.e.
@@ -573,12 +588,6 @@ impl<T> Sender<T> {
 
             // Update the local waker index to the current value of `INDEX`.
             idx = 1 - idx;
-
-            // Take the current waker.
-            //
-            // Safety: the receiver thread never accesses the waker stored at
-            // `INDEX`.
-            waker = unsafe { this.inner().take_waker(idx) };
         }
     }
 
@@ -689,7 +698,7 @@ impl Error for RecvError {}
 
 /// Creates a new multi-shot channel.
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let receiver = Receiver::new();
+    let mut receiver = Receiver::new();
     let sender = receiver.sender().unwrap();
 
     (sender, receiver)
