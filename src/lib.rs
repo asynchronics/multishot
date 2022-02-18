@@ -600,6 +600,10 @@ impl<T> Sender<T> {
 }
 
 unsafe impl<T: Send> Send for Sender<T> {}
+unsafe impl<T: Send> Sync for Sender<T> {}
+
+impl<T> UnwindSafe for Sender<T> {}
+impl<T> RefUnwindSafe for Sender<T> {}
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
