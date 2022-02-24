@@ -234,7 +234,10 @@ impl<T> Receiver<T> {
         // Ordering: This load synchronizes with the Release store in the
         // `Sender::send` method to ensure that the value (if any) is visible
         // and can be safely dropped.
-        let state = self.inner().state.load(Ordering::Acquire);
+        //
+        // Safety: it is safe to access `inner` as we did not clear the `OPEN`
+        // flag.
+        let state = unsafe { self.inner.as_ref().state.load(Ordering::Acquire) };
 
         // Verify that there is no live sender.
         if state & OPEN == 0 {
@@ -256,18 +259,12 @@ impl<T> Receiver<T> {
         Recv { receiver: self }
     }
 
-    /// Get a reference to inner.
-    fn inner(&self) -> &Inner<T> {
-        // Safety: this is safe since `inner` is allocated for at least as long
-        // as the receiver is alive.
-        unsafe { self.inner.as_ref() }
-    }
-
     /// Initialize the waker in slot 0, set the state to `OPEN | EMPTY` and
     /// return a sender.
     ///
-    /// Safety: The sender must have been consumed and all memory operations by
-    /// the sender on the value and on the waker must be visible in this thread.
+    /// Safety: `inner` must be allocated. The sender must have been consumed
+    /// and all memory operations by the sender on the value and on the waker
+    /// must be visible in this thread.
     unsafe fn sender_with_waker(&mut self, state: usize, waker: Option<Waker>) -> Sender<T> {
         // Only create a sender if there is no live sender.
         debug_assert!(state & OPEN == 0);
@@ -277,17 +274,20 @@ impl<T> Receiver<T> {
             // Safety: the presence of an initialized value was just
             // checked and there is no risk of race since there is no live
             // sender.
-            self.inner().drop_value_in_place();
+            self.inner.as_ref().drop_value_in_place();
         }
 
         // Set the waker in slot 0.
-        self.inner().set_waker(0, waker);
+        self.inner.as_ref().set_waker(0, waker);
 
         // Open the channel and set the current waker slot index to 0.
         //
         // Ordering: since the sender is created right now on this thread,
         // Relaxed ordering is sufficient.
-        self.inner().state.store(OPEN | EMPTY, Ordering::Relaxed);
+        self.inner
+            .as_ref()
+            .state
+            .store(OPEN | EMPTY, Ordering::Relaxed);
 
         Sender {
             inner: self.inner,
@@ -326,7 +326,10 @@ impl<T> Drop for Receiver<T> {
         // Ordering: the value and wakers may need to be dropped prior to
         // deallocation in case the sender was dropped too, so Acquire ordering
         // is necessary to synchronize with the Release store in `Sender::send`.
-        let state = self.inner().state.swap(0, Ordering::Acquire);
+
+        // Safety: it is safe to access `inner` as we have not yet cleared the
+        // `OPEN` flag.
+        let state = unsafe { self.inner.as_ref().state.swap(0, Ordering::Acquire) };
 
         // If the sender is alive, let it handle cleanup.
         if state & OPEN == OPEN {
@@ -341,7 +344,7 @@ impl<T> Drop for Receiver<T> {
             if state & EMPTY == 0 {
                 // Safety: the presence of an initialized value was just
                 // checked and there is no live receiver so no risk of race.
-                self.inner().drop_value_in_place();
+                self.inner.as_ref().drop_value_in_place();
             }
 
             // Deallocate inner.
@@ -364,9 +367,10 @@ impl<'a, T> Recv<'a, T> {
         debug_assert!(state & OPEN == 0);
 
         let ret = if state & EMPTY == 0 {
-            // Safety: the presence of an initialized value was just checked
-            // and there is no live sender so no risk of race.
-            let value = unsafe { self.receiver.inner().read_value() };
+            // Safety: the presence of an initialized value was just checked and
+            // there is no live sender so no risk of race. It is safe to access
+            // `inner` since we are now its single owner.
+            let value = unsafe { self.receiver.inner.as_ref().read_value() };
 
             Ok(value)
         } else {
@@ -378,7 +382,15 @@ impl<'a, T> Recv<'a, T> {
         //
         // Ordering: Relaxed is enough since the sender was dropped and
         // therefore no other thread can observe the state.
-        self.receiver.inner().state.store(EMPTY, Ordering::Relaxed);
+        //
+        // Safety: It is safe to access `inner` since we are now its single owner.
+        unsafe {
+            self.receiver
+                .inner
+                .as_ref()
+                .state
+                .store(EMPTY, Ordering::Relaxed);
+        }
 
         Poll::Ready(ret)
     }
@@ -419,7 +431,10 @@ impl<'a, T> Future for Recv<'a, T> {
 
         // Fast path: this is an optimization in case the sender has already
         // been consumed and has closed the channel.
-        let mut state = self.receiver.inner().state.load(Ordering::Acquire);
+        //
+        // Safety: It is safe to access `inner` since we did not clear the
+        // `OPEN` flag.
+        let mut state = unsafe { self.receiver.inner.as_ref().state.load(Ordering::Acquire) };
         if state & OPEN == 0 {
             return self.poll_complete(state);
         }
@@ -431,11 +446,17 @@ impl<'a, T> Future for Recv<'a, T> {
         if state & EMPTY == 0 {
             // Ordering: Acquire ordering is necessary since some member data may be
             // read and/or modified after reading the state.
-            state = self
-                .receiver
-                .inner()
-                .state
-                .fetch_or(EMPTY, Ordering::Acquire);
+            //
+            // Safety: it is safe to access `inner` since we did not clear the
+            // `OPEN` flag.
+            unsafe {
+                state = self
+                    .receiver
+                    .inner
+                    .as_ref()
+                    .state
+                    .fetch_or(EMPTY, Ordering::Acquire);
+            }
 
             // Check whether the sender has closed the channel.
             if state & OPEN == 0 {
@@ -449,12 +470,14 @@ impl<'a, T> Future for Recv<'a, T> {
 
         // Store the new waker.
         //
-        // Safety: the sender thread never accesses the waker stored in the
-        // slot not pointed to by `INDEX` and it does not modify `INDEX` as
-        // long as the `RADY` flag is set.
+        // Safety: the sender thread never accesses the waker stored in the slot
+        // not pointed to by `INDEX` and it does not modify `INDEX` as long as
+        // the `RADY` flag is set. It is safe to access `inner` since we did not
+        // clear the `OPEN` flag.
         unsafe {
             self.receiver
-                .inner()
+                .inner
+                .as_ref()
                 .set_waker(new_idx, Some(cx.waker().clone()));
         }
 
@@ -468,12 +491,15 @@ impl<'a, T> Future for Recv<'a, T> {
         // Ordering: the waker may have been modified above so Release ordering
         // is necessary to synchronize with the Acquire load in `Sender::send`
         // or `Sender::drop`. Acquire ordering is also necessary since the
-        // message may be loaded.
-        let state = self
-            .receiver
-            .inner()
-            .state
-            .swap(index_to_state(current_idx) | OPEN, Ordering::AcqRel);
+        // message may be loaded. It is safe to access `inner` since we did not
+        // clear the `OPEN` flag.
+        let state = unsafe {
+            self.receiver
+                .inner
+                .as_ref()
+                .state
+                .swap(index_to_state(current_idx) | OPEN, Ordering::AcqRel)
+        };
 
         // It is necessary to check again whether the sender has closed the
         // channel, because if it did, the sender may not have been able to send
@@ -517,9 +543,10 @@ impl<T> Sender<T> {
         // |  x  1  0  | !x  1  1  | -> Retry
 
         // It is necessary to make sure that the destructor is not run: since
-        // the `OPEN` flag is cleared once the value is sent, `Sender::drop`
-        // would otherwise wrongly consider the channel as closed by the
-        // receiver and would deallocate `inner` while the receiver is alive.
+        // the `OPEN` flag will be cleared once the value is sent,
+        // `Sender::drop` would otherwise wrongly consider the channel as closed
+        // by the receiver and would deallocate `inner` while the receiver is
+        // alive.
         let this = ManuallyDrop::new(self);
 
         // Store the value.
@@ -530,21 +557,26 @@ impl<T> Sender<T> {
         //
         // Safety: no race for accessing the value is possible since there can
         // be at most one sender alive at a time and the receiver will not read
-        // the value before the `OPEN` flag is cleared.
-        unsafe { this.inner().write_value(t) };
+        // the value before the `OPEN` flag is cleared. It is safe to access
+        // `inner` since we did not clear the `OPEN` flag.
+        unsafe { this.inner.as_ref().write_value(t) };
 
         // Retrieve the index of the current waker.
         //
         // Ordering: Relaxed ordering is sufficient since only the sender can
         // modify `INDEX`.
-        let mut idx = state_to_index(this.inner().state.load(Ordering::Relaxed));
+        //
+        // Safety: it is safe to access `inner` since we did not clear the
+        // `OPEN` flag.
+        let mut idx = state_to_index(unsafe { this.inner.as_ref().state.load(Ordering::Relaxed) });
 
         loop {
             // Take the current waker.
             //
             // Safety: the receiver thread never accesses the waker stored at
-            // `INDEX`.
-            let waker = unsafe { this.inner().take_waker(idx) };
+            // `INDEX`. It is safe to access `inner` since we did not
+            // clear the `OPEN` flag.
+            let waker = unsafe { this.inner.as_ref().take_waker(idx) };
 
             // Rather than a Compare-And-Swap, a `fetch_sub` operation is used
             // as it is faster on many platforms. The specific order of the
@@ -558,17 +590,26 @@ impl<T> Sender<T> {
             // waker in the previous loop iteration (if any). The Release
             // synchronizes with the Acquire load of the state in the receiver
             // `poll` and `sender` methods.
-            let state = this.inner().state.fetch_sub(OPEN | EMPTY, Ordering::AcqRel);
+            //
+            // Safety: it is safe to access `inner` since we did not clear the
+            // `OPEN` flag.
+            let state = unsafe {
+                this.inner
+                    .as_ref()
+                    .state
+                    .fetch_sub(OPEN | EMPTY, Ordering::AcqRel)
+            };
 
             // Deallocate the channel if closed.
             //
-            // Safety: `inner` will no longer be used once deallocated. In
-            // particular, the destructor will not be called.
+            // Safety: it is safe to access `inner` since we did not clear the
+            // `OPEN` flag. `inner` will no longer be used once deallocated. In
+            // particular, the sender destructor will not be called.
             unsafe {
                 if state & OPEN == 0 {
                     // Safety: a value was just written and there is no live
                     // receiver so no risk of a race.
-                    this.inner().drop_value_in_place();
+                    this.inner.as_ref().drop_value_in_place();
                     drop(Box::from_raw(this.inner.as_ptr()));
                     return;
                 }
@@ -576,20 +617,15 @@ impl<T> Sender<T> {
 
             // If the waker was not updated, notify the receiver and return.
             if state & EMPTY == EMPTY {
-                waker.map(Waker::wake);
+                if let Some(waker) = waker {
+                    waker.wake()
+                }
                 return;
             }
 
             // Update the local waker index to the current value of `INDEX`.
             idx = 1 - idx;
         }
-    }
-
-    /// Get a reference to inner.
-    fn inner(&self) -> &Inner<T> {
-        // Safety: this is safe since `inner` is allocated for at least as long
-        // as the sender is alive.
-        unsafe { self.inner.as_ref() }
     }
 }
 
@@ -615,19 +651,20 @@ impl<T> Drop for Sender<T> {
         // |  x  1  1  |  0  0  1  | -> End
         // |  x  1  0  | !x  1  1  | -> Retry
 
-        // Retrieve the index of the current waker.
+        // Retrieve the state and the current index.
         //
         // Ordering: Relaxed ordering is sufficient since only the sender can
         // modify `INDEX`.
-        let mut idx = state_to_index(self.inner().state.load(Ordering::Relaxed));
+        let mut state = unsafe { self.inner.as_ref().state.load(Ordering::Relaxed) };
+        let mut idx = state_to_index(state);
 
-        let mut state = self.inner().state.load(Ordering::Relaxed);
         loop {
             // Take the current waker.
             //
             // Safety: the receiver thread never accesses the waker stored at
-            // `INDEX`.
-            let waker = unsafe { self.inner().take_waker(idx) };
+            // `INDEX`. It is safe to access `inner` since we did not clear the
+            // `OPEN` flag.
+            let waker = unsafe { self.inner.as_ref().take_waker(idx) };
 
             loop {
                 // Modify the state according to the transition table.
@@ -637,28 +674,34 @@ impl<T> Drop for Sender<T> {
                     state ^ (EMPTY | INDEX)
                 };
 
-                // Ordering: Acquire is necessary to synchronize with the Release
-                // store in the `Receiver::poll` method in case an updated waker
-                // needs to be taken or if the channel was closed and the wakers
-                // need to be dropped. Release is in turn necessary to ensure the
-                // visibility of the consumption of the waker in the previous loop
-                // iteration (if any). The Release synchronizes with the Acquire
-                // load of the state in the receiver `poll` and `sender` methods.
-                match self.inner().state.compare_exchange_weak(
-                    state,
-                    new_state,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(s) => {
-                        state = s;
-                        break;
+                // Ordering: Acquire is necessary to synchronize with the
+                // Release store in the `Receiver::poll` method in case an
+                // updated waker needs to be taken or if the channel was closed
+                // and the wakers need to be dropped. Release is in turn
+                // necessary to ensure the visibility of the consumption of the
+                // waker in the previous loop iteration (if any). The Release
+                // synchronizes with the Acquire load of the state in the
+                // receiver `poll` and `sender` methods.
+                //
+                // Safety: it is safe to access `inner` since we have not yet
+                // cleared the `OPEN` flag.
+                unsafe {
+                    match self.inner.as_ref().state.compare_exchange_weak(
+                        state,
+                        new_state,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(s) => {
+                            state = s;
+                            break;
+                        }
+                        Err(s) => state = s,
                     }
-                    Err(s) => state = s,
                 }
             }
 
-            // Deallocate the channel if closed.
+            // Deallocate the channel if it was already closed by the receiver.
             //
             // Safety: `inner` will no longer be used once deallocated.
             unsafe {
@@ -670,7 +713,9 @@ impl<T> Drop for Sender<T> {
 
             // If the waker was not updated, notify the receiver and return.
             if state & EMPTY == EMPTY {
-                waker.map(Waker::wake);
+                if let Some(waker) = waker {
+                    waker.wake()
+                }
                 return;
             }
 
