@@ -99,7 +99,7 @@
 // |  x  1  0  |   Any    | an updated waker is registered at index !x  |
 // |  x  1  1  |   Any    |     a waker may be registered at index x    |
 
-mod loom_types;
+mod loom_exports;
 
 use std::error::Error;
 use std::fmt;
@@ -112,8 +112,8 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Waker};
 
-use crate::loom_types::cell::UnsafeCell;
-use crate::loom_types::sync::atomic::AtomicUsize;
+use crate::loom_exports::cell::UnsafeCell;
+use crate::loom_exports::sync::atomic::AtomicUsize;
 
 // Note: the order of the flags is NOT arbitrary (see comments in the
 // `Sender::send` method for the rationale).
