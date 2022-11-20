@@ -68,7 +68,7 @@
 // signaling the presence of a value.
 //
 // Despite the relative complexity of the state machine, the implementation is
-// fairly efficient. Polling requires not read-modify-write (RMW) operation if
+// fairly efficient. Polling requires no read-modify-write (RMW) operation if
 // the value is readily available, 1 RMW if this is the first waker update and 2
 // RMWs otherwise. Sending needs 1 RMW if no waker was registered, and typically
 // 2 RMW if one was registered. Compared to a non-reusable one-shot channel such
@@ -472,8 +472,12 @@ impl<'a, T> Future for Recv<'a, T> {
         //
         // Safety: the sender thread never accesses the waker stored in the slot
         // not pointed to by `INDEX` and it does not modify `INDEX` as long as
-        // the `RADY` flag is set. It is safe to access `inner` since we did not
-        // clear the `OPEN` flag.
+        // the `READY` flag is set. It is safe to access `inner` since we did
+        // not clear the `OPEN` flag.
+        //
+        // Unwind safety: even if `Waker::clone` panics, the state will be
+        // consistent since `OPEN` and `EMPTY` are both set, meaning that the
+        // redundant waker will not be accessed when the receiver is dropped.
         unsafe {
             self.receiver
                 .inner
@@ -617,6 +621,8 @@ impl<T> Sender<T> {
 
             // If the waker was not updated, notify the receiver and return.
             if state & EMPTY == EMPTY {
+                // Unwind safety: the state has already been updated, so
+                // panicking in `Waker::wake` is OK.
                 if let Some(waker) = waker {
                     waker.wake()
                 }
@@ -713,6 +719,8 @@ impl<T> Drop for Sender<T> {
 
             // If the waker was not updated, notify the receiver and return.
             if state & EMPTY == EMPTY {
+                // Unwind safety: the state has already been updated, so
+                // panicking in `Waker::wake` is OK.
                 if let Some(waker) = waker {
                     waker.wake()
                 }
