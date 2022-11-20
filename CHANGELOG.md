@@ -1,3 +1,8 @@
+# 0.3.0 (????-??-??)
+
+- Implement `Send`, `UnwindSafe` and `RefUnwindSafe` for `Sender`.
+- Simplify implementation and improve performance.
+
 # 0.2.0 (2022-02-14)
 
 - Fix soundness issue in `Receiver::sender` which should have taken `&mut self`

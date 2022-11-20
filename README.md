@@ -69,15 +69,18 @@ absence of data races.
 
 ## Implementation
 
-The implementation uses only 2 read-modify-write operations to poll the
-receiver's future (or none if the value is already present) and typically 1 or 2
-read-modify-write for sending, depending whether a waker was registered or not.
-Overall, compared to a non-reusable one-shot channel such as Tokio's, the only
-extra cost is 1 read-modify-write operation if and only if a waker was already
-registered when the value is sent. The implementation of Multishot partially
-offsets this small extra cost, however, by using arithmetic atomic operations
-when sending a value rather than typically more expensive compare-and-swap
-operations.
+Sending, receiving and recycling a sender are lock-free operations; the last two
+are additionally wait-free.
+
+Polling requires no read-modify-write (RMW) operation if the value is readily
+available, 1 RMW if this is the first waker update and 2 RMWs otherwise. Sending
+needs 1 RMW if no waker was registered, and typically 2 RMW if one was
+registered. Compared to a non-reusable one-shot channel such as Tokio's, the
+only extra cost is 1 RMW in case the waker was updated (which is rare in
+practice). Also, the implementation of `multishot` partially offsets this extra
+cost by using arithmetic atomic operations when sending rather than the
+typically more expensive compare-and-swap operation.
+
 
 ## License
 

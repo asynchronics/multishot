@@ -72,13 +72,13 @@
 // the value is readily available, 1 RMW if this is the first waker update and 2
 // RMWs otherwise. Sending needs 1 RMW if no waker was registered, and typically
 // 2 RMW if one was registered. Compared to a non-reusable one-shot channel such
-// as Tokio's, the only extra cost is 1 read-modify-write in case the waker was
-// updated. Also, the implementation of `multishot` partially offsets this extra
-// cost by using arithmetic atomic operations when sending rather than the
-// typically more expensive compare-and-swap operations.
+// as Tokio's, the only extra cost is 1 RMW in case the waker was updated (which
+// is rare in practice). Also, the implementation of `multishot` partially
+// offsets this extra cost by using arithmetic atomic operations when sending
+// rather than the typically more expensive compare-and-swap operation.
 //
-// Sending, receiving and recycling operations are lock-free; the last two are
-// additionally wait-free.
+// Sending, receiving and recycling a sender are lock-free operations; the last
+// two are additionally wait-free.
 //
 // The state of the channel is tracked by the following bit flags:
 //
