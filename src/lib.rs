@@ -142,7 +142,7 @@ impl<T> Inner<T> {
     //
     // Safety: the caller must have exclusive access to the value.
     unsafe fn write_value(&self, t: T) {
-        self.value.with_mut(|value| (&mut *value).write(t));
+        self.value.with_mut(|value| (*value).write(t));
     }
 
     // Reads the value without moving it.
