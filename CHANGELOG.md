@@ -1,4 +1,4 @@
-# ?.?.? (????-??-??)
+# 0.3.0 (2022-29-12)
 
 - Implement `Send`, `UnwindSafe` and `RefUnwindSafe` for `Sender`.
 - Simplify implementation and improve performance.
