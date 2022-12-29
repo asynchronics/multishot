@@ -1,7 +1,8 @@
-# 0.3.0 (????-??-??)
+# ?.?.? (????-??-??)
 
 - Implement `Send`, `UnwindSafe` and `RefUnwindSafe` for `Sender`.
 - Simplify implementation and improve performance.
+- Enable multi-threading in MIRI tests and add tests.
 
 # 0.2.0 (2022-02-14)
 

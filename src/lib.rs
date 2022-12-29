@@ -326,10 +326,14 @@ impl<T> Drop for Receiver<T> {
         // Ordering: the value and wakers may need to be dropped prior to
         // deallocation in case the sender was dropped too, so Acquire ordering
         // is necessary to synchronize with the Release store in `Sender::send`.
+        // Release ordering is in turn necessary in case the sender is still
+        // alive: it synchronizes with the Acquire operations in either
+        // `Sender::send` or in the drop handler of the sender to ensure that
+        // `inner` can be dropped safely.
 
         // Safety: it is safe to access `inner` as we have not yet cleared the
         // `OPEN` flag.
-        let state = unsafe { self.inner.as_ref().state.swap(0, Ordering::Acquire) };
+        let state = unsafe { self.inner.as_ref().state.swap(0, Ordering::AcqRel) };
 
         // If the sender is alive, let it handle cleanup.
         if state & OPEN == OPEN {
@@ -589,11 +593,13 @@ impl<T> Sender<T> {
             //
             // Ordering: Acquire is necessary to synchronize with the Release
             // store in the `Receiver::poll` method in case an updated waker
-            // needs to be taken. Release is in turn necessary to ensure the
-            // visibility of both (i) the value and (ii) the consumption of the
-            // waker in the previous loop iteration (if any). The Release
-            // synchronizes with the Acquire load of the state in the receiver
-            // `poll` and `sender` methods.
+            // needs to be taken, or with the Acquire operation in the drop
+            // handler of the receiver in case the channel was closed and
+            // `inner` needs to be dropped. Release is in turn necessary to
+            // ensure the visibility of both (i) the value and (ii) the
+            // consumption of the waker in the previous loop iteration (if any).
+            // The Release synchronizes with the Acquire load of the state in
+            // the receiver `poll` and `sender` methods.
             //
             // Safety: it is safe to access `inner` since we did not clear the
             // `OPEN` flag.
@@ -682,8 +688,9 @@ impl<T> Drop for Sender<T> {
 
                 // Ordering: Acquire is necessary to synchronize with the
                 // Release store in the `Receiver::poll` method in case an
-                // updated waker needs to be taken or if the channel was closed
-                // and the wakers need to be dropped. Release is in turn
+                // updated waker needs to be taken or with the Acquire operation
+                // in the drop handler of the receiver in case the channel was
+                // closed and `inner` needs to be dropped. Release is in turn
                 // necessary to ensure the visibility of the consumption of the
                 // waker in the previous loop iteration (if any). The Release
                 // synchronizes with the Acquire load of the state in the
@@ -767,6 +774,7 @@ mod tests {
     use std::future::Future;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake};
+    use std::thread;
 
     // Dumb waker counting notifications.
     struct TestWaker {
@@ -788,33 +796,9 @@ mod tests {
         }
     }
 
-    #[cfg(not(miri))]
-    fn spawn_and_join<F>(f: F)
-    where
-        F: FnOnce(),
-        F: Send + 'static,
-    {
-        let th = std::thread::spawn({
-            move || {
-                f();
-            }
-        });
-        th.join().unwrap();
-    }
-
-    #[cfg(miri)]
-    // MIRI does not support threads, so just execute sequentially.
-    fn spawn_and_join<F>(f: F)
-    where
-        F: FnOnce(),
-        F: Send + 'static,
-    {
-        f();
-    }
-
     // Executes a closure consuming the sender and checks the result of the
     // completed future.
-    fn multishot_notify<F>(f: F, expect: Result<i32, RecvError>)
+    fn multishot_notify_single_threaded<F>(f: F, expect: Result<i32, RecvError>)
     where
         F: FnOnce(Sender<i32>) + Send + Copy + 'static,
     {
@@ -829,7 +813,8 @@ mod tests {
             let mut fut = receiver.recv();
             let mut fut = Pin::new(&mut fut);
 
-            spawn_and_join(move || f(sender));
+            f(sender);
+
             let res = fut.as_mut().poll(&mut cx);
             assert_eq!(test_waker.take_count(), 0);
             assert_eq!(res, Poll::Ready(expect));
@@ -843,15 +828,26 @@ mod tests {
 
             let res = fut.as_mut().poll(&mut cx);
             assert_eq!(res, Poll::Pending);
-            spawn_and_join(move || f(sender));
+            f(sender);
             assert_eq!(test_waker.take_count(), 1);
             let res = fut.as_mut().poll(&mut cx);
             assert_eq!(res, Poll::Ready(expect));
         }
     }
 
+    #[test]
+    /// Sends a message.
+    fn multishot_send_notify_single_threaded() {
+        multishot_notify_single_threaded(|sender| sender.send(42), Ok(42));
+    }
+    #[test]
+    /// Drops the sender.
+    fn multishot_drop_notify_single_threaded() {
+        multishot_notify_single_threaded(|sender| drop(sender), Err(RecvError {}));
+    }
+
     // Changes the waker before executing a closure consuming the sender.
-    fn multishot_change_waker<F>(f: F, expect: Result<i32, RecvError>)
+    fn multishot_change_waker_single_threaded<F>(f: F, expect: Result<i32, RecvError>)
     where
         F: FnOnce(Sender<i32>) + Send + Copy + 'static,
     {
@@ -875,7 +871,7 @@ mod tests {
             assert_eq!(res, Poll::Pending);
             let res = fut.as_mut().poll(&mut cx2);
             assert_eq!(res, Poll::Pending);
-            spawn_and_join(move || f(sender));
+            f(sender);
             assert_eq!(test_waker2.take_count(), 1);
             let res = fut.as_mut().poll(&mut cx1);
             assert_eq!(test_waker1.take_count(), 0);
@@ -895,7 +891,7 @@ mod tests {
             assert_eq!(res, Poll::Pending);
             let res = fut.as_mut().poll(&mut cx3);
             assert_eq!(res, Poll::Pending);
-            spawn_and_join(move || f(sender));
+            f(sender);
             assert_eq!(test_waker3.take_count(), 1);
             let res = fut.as_mut().poll(&mut cx2);
             assert_eq!(test_waker1.take_count(), 0);
@@ -903,25 +899,85 @@ mod tests {
             assert_eq!(res, Poll::Ready(expect));
         }
     }
-    #[test]
-    /// Sends a message.
-    fn multishot_send_notify() {
-        multishot_notify(|sender| sender.send(42), Ok(42));
-    }
-    #[test]
-    /// Drops the sender.
-    fn multishot_drop_notify() {
-        multishot_notify(|sender| drop(sender), Err(RecvError {}));
-    }
+
     #[test]
     /// Sends a message after changing the waker.
-    fn multishot_send_change_waker() {
-        multishot_change_waker(|sender| sender.send(42), Ok(42));
+    fn multishot_send_change_waker_single_threaded() {
+        multishot_change_waker_single_threaded(|sender| sender.send(42), Ok(42));
     }
     #[test]
     /// Drops the sender after changing the waker.
-    fn multishot_drop_change_waker() {
-        multishot_change_waker(|sender| drop(sender), Err(RecvError {}));
+    fn multishot_drop_change_waker_single_threaded() {
+        multishot_change_waker_single_threaded(|sender| drop(sender), Err(RecvError {}));
+    }
+
+    // Executes a closure consuming the sender on a separate thread and checks
+    // the result of the completed future.
+    fn multishot_notify_multi_threaded<F>(f: F, expect: Result<i32, RecvError>)
+    where
+        F: FnOnce(Sender<i32>) + Send + Copy + 'static,
+    {
+        let test_waker = Arc::new(TestWaker::new());
+        let waker = test_waker.clone().into();
+        let mut cx = Context::from_waker(&waker);
+        let mut receiver: Receiver<i32> = Receiver::new();
+
+        let sender = receiver.sender().expect("could not create sender");
+        let mut fut = receiver.recv();
+        let mut fut = Pin::new(&mut fut);
+
+        let th = thread::spawn(move || f(sender));
+
+        let res = fut.as_mut().poll(&mut cx);
+
+        th.join().unwrap();
+
+        match res {
+            Poll::Pending => {
+                assert_eq!(test_waker.take_count(), 1);
+                assert_eq!(fut.as_mut().poll(&mut cx), Poll::Ready(expect));
+            }
+            Poll::Ready(res) => assert_eq!(res, expect),
+        }
+    }
+
+    #[test]
+    /// Sends a message from another thread.
+    fn multishot_send_notify_multi_threaded() {
+        multishot_notify_multi_threaded(|sender| sender.send(42), Ok(42));
+    }
+    #[test]
+    /// Drops the sender on another thread.
+    fn multishot_drop_notify_multi_threaded() {
+        multishot_notify_multi_threaded(|sender| drop(sender), Err(RecvError {}));
+    }
+
+    #[test]
+    // Drop both the sender and receiver concurrently. This test is mainly meant
+    // for MIRI.
+    fn multishot_drop_both_multi_threaded() {
+        let mut receiver: Receiver<i32> = Receiver::new();
+
+        let sender = receiver.sender().expect("could not create sender");
+
+        let th = thread::spawn(move || drop(sender));
+        drop(receiver);
+
+        th.join().unwrap();
+    }
+
+    #[test]
+    // Consume the sender and drop the receiver concurrently. This test is
+    // mainly meant for MIRI.
+    fn multishot_send_and_drop_multi_threaded() {
+        let mut receiver: Receiver<i32> = Receiver::new();
+
+        let sender = receiver.sender().expect("could not create sender");
+
+        let th = thread::spawn(move || sender.send(123));
+        drop(receiver);
+
+        th.join().unwrap();
     }
 }
 
