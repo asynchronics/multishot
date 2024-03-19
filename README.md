@@ -22,7 +22,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-multishot = "0.3.0"
+multishot = "0.3.1"
 ```
 
 ## Example
@@ -60,9 +60,9 @@ async {
 ## Safety
 
 This is a low-level primitive and as such its implementation relies on `unsafe`.
-The test suite makes extensive use of [Loom] to assess its correctness. As
-amazing as it is, however, Loom is only a tool: it cannot formally prove the
-absence of data races.
+The test suite makes extensive use of [Loom] and MIRI to assess its correctness.
+As amazing as they are, however, Loom and MIRI cannot formally prove the absence
+of data races so soundness issues _are_ possible.
 
 [Loom]: https://github.com/tokio-rs/loom
 
