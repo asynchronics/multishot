@@ -771,9 +771,8 @@ fn index_to_state(index: usize) -> usize {
 mod tests {
     use super::*;
 
-    use std::future::Future;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake};
+    use std::task::Wake;
     use std::thread;
 
     // Dumb waker counting notifications.
