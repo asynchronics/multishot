@@ -19,7 +19,7 @@ categories = ["asynchronous", "concurrency"]
 keywords = ["async", "channel", "oneshot", "reusable", "futures"]
 
 [dev-dependencies]
-executor = "0.8"
+pollster = "0.3"
 
 [target.'cfg(multishot_loom)'.dependencies]
 loom = "0.5"

@@ -9,10 +9,10 @@
 //!
 //!
 //! ```
-//! # use executor;
+//! # use pollster;
 //! use std::thread;
 //!
-//! # executor::run(
+//! # pollster::block_on(
 //! async {
 //!     let (s, mut r) = multishot::channel();
 //!
