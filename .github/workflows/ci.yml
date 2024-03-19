@@ -68,7 +68,7 @@ jobs:
           components: miri
 
       - name: Run cargo miri
-        run: cargo miri test --tests
+        run: cargo miri test
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
 
