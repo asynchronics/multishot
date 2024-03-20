@@ -1,3 +1,9 @@
+# 0.3.2 (2024-03-20)
+
+- (**Soundness issue**) Fix drop handler call on uninitialized memory ([#4]).
+
+[#4]: https://github.com/asynchronics/multishot/pull/2
+
 # 0.3.1 (2024-03-19)
 
 - Replace `executor` crate with `pollster` in doctests to work around possible
