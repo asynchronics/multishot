@@ -202,7 +202,7 @@ impl<T> Receiver<T> {
     pub fn new() -> Self {
         Self {
             inner: NonNull::new(Box::into_raw(Box::new(Inner {
-                state: AtomicUsize::new(0),
+                state: AtomicUsize::new(EMPTY),
                 value: UnsafeCell::new(MaybeUninit::uninit()),
                 waker: [UnsafeCell::new(None), UnsafeCell::new(None)],
             })))
@@ -799,12 +799,12 @@ mod tests {
     // completed future.
     fn multishot_notify_single_threaded<F>(f: F, expect: Result<i32, RecvError>)
     where
-        F: FnOnce(Sender<i32>) + Send + Copy + 'static,
+        F: FnOnce(Sender<Box<i32>>) + Send + Copy + 'static,
     {
         let test_waker = Arc::new(TestWaker::new());
         let waker = test_waker.clone().into();
         let mut cx = Context::from_waker(&waker);
-        let mut receiver: Receiver<i32> = Receiver::new();
+        let mut receiver: Receiver<Box<i32>> = Receiver::new();
 
         // Consume sender before polling.
         {
@@ -816,7 +816,7 @@ mod tests {
 
             let res = fut.as_mut().poll(&mut cx);
             assert_eq!(test_waker.take_count(), 0);
-            assert_eq!(res, Poll::Ready(expect));
+            assert_eq!(res.map_ok(|v| *v), Poll::Ready(expect));
         }
 
         // Consume sender after polling.
@@ -830,14 +830,14 @@ mod tests {
             f(sender);
             assert_eq!(test_waker.take_count(), 1);
             let res = fut.as_mut().poll(&mut cx);
-            assert_eq!(res, Poll::Ready(expect));
+            assert_eq!(res.map_ok(|v| *v), Poll::Ready(expect));
         }
     }
 
     #[test]
     /// Sends a message.
     fn multishot_send_notify_single_threaded() {
-        multishot_notify_single_threaded(|sender| sender.send(42), Ok(42));
+        multishot_notify_single_threaded(|sender| sender.send(Box::new(42)), Ok(42));
     }
     #[test]
     /// Drops the sender.
@@ -848,7 +848,7 @@ mod tests {
     // Changes the waker before executing a closure consuming the sender.
     fn multishot_change_waker_single_threaded<F>(f: F, expect: Result<i32, RecvError>)
     where
-        F: FnOnce(Sender<i32>) + Send + Copy + 'static,
+        F: FnOnce(Sender<Box<i32>>) + Send + Copy + 'static,
     {
         let test_waker1 = Arc::new(TestWaker::new());
         let waker1 = test_waker1.clone().into();
@@ -862,7 +862,7 @@ mod tests {
 
         // Change waker and consume sender.
         {
-            let (sender, mut receiver) = channel::<i32>();
+            let (sender, mut receiver) = channel::<Box<i32>>();
             let mut fut = receiver.recv();
             let mut fut = Pin::new(&mut fut);
 
@@ -875,12 +875,12 @@ mod tests {
             let res = fut.as_mut().poll(&mut cx1);
             assert_eq!(test_waker1.take_count(), 0);
             assert_eq!(test_waker2.take_count(), 0);
-            assert_eq!(res, Poll::Ready(expect));
+            assert_eq!(res.map_ok(|v| *v), Poll::Ready(expect));
         }
 
         // Change waker twice and consume sender.
         {
-            let (sender, mut receiver) = channel::<i32>();
+            let (sender, mut receiver) = channel::<Box<i32>>();
             let mut fut = receiver.recv();
             let mut fut = Pin::new(&mut fut);
 
@@ -895,14 +895,14 @@ mod tests {
             let res = fut.as_mut().poll(&mut cx2);
             assert_eq!(test_waker1.take_count(), 0);
             assert_eq!(test_waker2.take_count(), 0);
-            assert_eq!(res, Poll::Ready(expect));
+            assert_eq!(res.map_ok(|v| *v), Poll::Ready(expect));
         }
     }
 
     #[test]
     /// Sends a message after changing the waker.
     fn multishot_send_change_waker_single_threaded() {
-        multishot_change_waker_single_threaded(|sender| sender.send(42), Ok(42));
+        multishot_change_waker_single_threaded(|sender| sender.send(Box::new(42)), Ok(42));
     }
     #[test]
     /// Drops the sender after changing the waker.
@@ -914,12 +914,12 @@ mod tests {
     // the result of the completed future.
     fn multishot_notify_multi_threaded<F>(f: F, expect: Result<i32, RecvError>)
     where
-        F: FnOnce(Sender<i32>) + Send + Copy + 'static,
+        F: FnOnce(Sender<Box<i32>>) + Send + Copy + 'static,
     {
         let test_waker = Arc::new(TestWaker::new());
         let waker = test_waker.clone().into();
         let mut cx = Context::from_waker(&waker);
-        let mut receiver: Receiver<i32> = Receiver::new();
+        let mut receiver: Receiver<Box<i32>> = Receiver::new();
 
         let sender = receiver.sender().expect("could not create sender");
         let mut fut = receiver.recv();
@@ -934,16 +934,19 @@ mod tests {
         match res {
             Poll::Pending => {
                 assert_eq!(test_waker.take_count(), 1);
-                assert_eq!(fut.as_mut().poll(&mut cx), Poll::Ready(expect));
+                assert_eq!(
+                    fut.as_mut().poll(&mut cx).map_ok(|v| *v),
+                    Poll::Ready(expect)
+                );
             }
-            Poll::Ready(res) => assert_eq!(res, expect),
+            Poll::Ready(res) => assert_eq!(res.map(|v| *v), expect),
         }
     }
 
     #[test]
     /// Sends a message from another thread.
     fn multishot_send_notify_multi_threaded() {
-        multishot_notify_multi_threaded(|sender| sender.send(42), Ok(42));
+        multishot_notify_multi_threaded(|sender| sender.send(Box::new(42)), Ok(42));
     }
     #[test]
     /// Drops the sender on another thread.
@@ -955,7 +958,7 @@ mod tests {
     // Drop both the sender and receiver concurrently. This test is mainly meant
     // for MIRI.
     fn multishot_drop_both_multi_threaded() {
-        let mut receiver: Receiver<i32> = Receiver::new();
+        let mut receiver: Receiver<Box<i32>> = Receiver::new();
 
         let sender = receiver.sender().expect("could not create sender");
 
@@ -969,11 +972,11 @@ mod tests {
     // Consume the sender and drop the receiver concurrently. This test is
     // mainly meant for MIRI.
     fn multishot_send_and_drop_multi_threaded() {
-        let mut receiver: Receiver<i32> = Receiver::new();
+        let mut receiver: Receiver<Box<i32>> = Receiver::new();
 
         let sender = receiver.sender().expect("could not create sender");
 
-        let th = thread::spawn(move || sender.send(123));
+        let th = thread::spawn(move || sender.send(Box::new(123)));
         drop(receiver);
 
         th.join().unwrap();
