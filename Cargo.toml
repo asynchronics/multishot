@@ -23,3 +23,6 @@ pollster = "0.3"
 
 [target.'cfg(multishot_loom)'.dependencies]
 loom = "0.5"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(multishot_loom)'] }
