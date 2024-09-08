@@ -1,21 +1,21 @@
-#[cfg(multishot_loom)]
+#[cfg(all(test, multishot_loom))]
 pub(crate) mod sync {
     pub(crate) mod atomic {
         pub(crate) use loom::sync::atomic::AtomicUsize;
     }
 }
-#[cfg(not(multishot_loom))]
+#[cfg(not(all(test, multishot_loom)))]
 pub(crate) mod sync {
     pub(crate) mod atomic {
         pub(crate) use std::sync::atomic::AtomicUsize;
     }
 }
 
-#[cfg(multishot_loom)]
+#[cfg(all(test, multishot_loom))]
 pub(crate) mod cell {
     pub(crate) use loom::cell::UnsafeCell;
 }
-#[cfg(not(multishot_loom))]
+#[cfg(not(all(test, multishot_loom)))]
 pub(crate) mod cell {
     #[derive(Debug)]
     pub(crate) struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
